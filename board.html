@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI.Director - 剪辑工作台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: { 
+                extend: { 
+                    colors: { 
+                        zinc: { 950: '#09090b', 900: '#18181b', 850: '#202022', 800: '#27272a', 700: '#3f3f46', 600: '#52525b', 400: '#a1a1aa', 100: '#f4f4f5' } 
+                    },
+                    cursor: { 'col-resize': 'col-resize', 'ew-resize': 'ew-resize' }
+                } 
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #09090b; color: #f4f4f5; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; user-select: none; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 2px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        
+        /* 拖拽时的幽灵样式缓冲 */
+        .dragging { opacity: 0.5; border: 1px dashed white !important; }
+        
+        /* 镜头详情面板动画 */
+        .shot-detail-panel {
+            transition: all 0.2s ease-out;
+            opacity: 0;
+            transform: translateY(-8px);
+        }
+        .shot-detail-panel.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        /* 镜头切换过渡 */
+        .preview-content {
+            transition: opacity 0.3s ease;
+        }
+        .shot-card {
+            transition: all 0.2s ease;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="h-screen flex flex-col overflow-hidden text-sm">
+        
+        <!-- 隐藏输入框 (加入视频支持) -->
+        <input type="file" ref="assetInput" accept="image/*,video/*" multiple class="hidden" @change="handleAssetUpload">
+        <input type="file" ref="audioInput" accept="audio/*" class="hidden" @change="handleAudioUpload">
+        <audio ref="audioPlayer" class="hidden"></audio>
+
+        <!-- 主工作区 -->
+        <div class="flex-1 flex min-h-0">
+            
+            <div @click="prevShot" class="w-12 border-r border-zinc-800 bg-zinc-950 hover:bg-zinc-900 cursor-pointer flex items-center justify-center transition group z-10">
+                <i class="fa-solid fa-chevron-left text-zinc-600 group-hover:text-white text-xl"></i>
+            </div>
+
+            <div class="flex-1 flex flex-col min-w-0 bg-zinc-900">
+                
+                <!-- 1. 预览窗口 -->
+                <div class="flex-1 bg-black relative flex items-center justify-center overflow-hidden group">
+                    <div class="w-full h-full relative flex items-center justify-center bg-zinc-950/50 preview-content">
+                        
+                        <!-- 播放模式 -->
+                        <template v-if="isPlaying">
+                            <!-- 有生成出的成片 -->
+                            <video v-if="currentPlayingShot && currentPlayingShot.video_url" :src="currentPlayingShot.video_url" class="max-w-full max-h-full object-contain" autoplay muted loop></video>
+                            
+                            <!-- 没成片，但有参考素材 -->
+                            <template v-else-if="currentPlayingShot && currentPlayingShot.assets.length > 0">
+                                <video v-if="currentPlayingShot.assets[0].type === 'video'" :src="currentPlayingShot.assets[0].url" class="max-w-full max-h-full object-contain" autoplay muted loop></video>
+                                <img v-else :src="currentPlayingShot.assets[0].url" class="max-w-full max-h-full object-contain opacity-80">
+                            </template>
+                            
+                            <div v-else class="text-zinc-700 font-mono">WAITING FOR GENERATION</div>
+                        </template>
+
+                        <!-- 编辑模式 -->
+                        <template v-else>
+                            <!-- 有生成视频 -->
+                            <video v-if="activeShot && activeShot.video_url" :src="activeShot.video_url" controls class="max-w-full max-h-full object-contain"></video>
+                            
+                            <!-- 没视频，显示选中的参考图/视频 -->
+                            <template v-else-if="currentPreviewAsset">
+                                <video v-if="currentPreviewAsset.type === 'video'" :src="currentPreviewAsset.url" controls class="max-w-full max-h-full object-contain"></video>
+                                <img v-else :src="currentPreviewAsset.url" class="max-w-full max-h-full object-contain">
+                            </template>
+                            
+                            <!-- 空状态 -->
+                            <div v-else class="flex flex-col items-center gap-2 text-zinc-700">
+                                <i class="fa-solid fa-photo-film text-4xl"></i>
+                                <span class="font-mono text-xs">NO PREVIEW / UPLOAD REFS</span>
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- 新增：当前时间线镜头详情面板 (带动画) -->
+                    <div class="shot-detail-panel absolute top-4 left-4 bg-black/70 px-3 py-2 rounded text-xs font-mono border border-zinc-800/50 z-20 backdrop-blur-sm" :class="{ visible: currentPlayingShot }">
+                        <div v-if="currentPlayingShot" class="flex flex-col gap-1">
+                            <div class="flex items-center gap-2">
+                                <span class="text-white font-bold">Shot {{ currentPlayingShot.id }}</span>
+                                <span class="text-zinc-400 text-[9px]">
+                                    {{ currentPlayingShot.start.toFixed(1) }}s - {{ currentPlayingShot.end.toFixed(1) }}s 
+                                    (时长: {{ currentPlayingShot.duration.toFixed(1) }}s)
+                                </span>
+                            </div>
+                            <div class="text-zinc-300 text-[9px] line-clamp-2">
+                                {{ currentPlayingShot.prompt || '无镜头描述' }}
+                            </div>
+                            <div class="flex gap-2 text-zinc-500 text-[8px]">
+                                <span>比例: {{ currentPlayingShot.ratio || '16:9' }}</span>
+                                <span>分辨率: {{ project.resolution || '1080p' }}</span>
+                                <span>模型: {{ project.model_name || 'Runway Gen-3' }}</span>
+                            </div>
+                        </div>
+                        <div v-else class="text-zinc-500 text-[9px]">无当前镜头</div>
+                    </div>
+
+                    <div class="absolute top-4 right-4 z-20">
+                        <button class="w-8 h-8 rounded-full bg-zinc-800/80 border border-zinc-600 hover:bg-zinc-700 hover:border-white text-zinc-400 hover:text-white transition flex items-center justify-center" title="备用废片库">
+                            <i class="fa-solid fa-layer-group"></i>
+                        </button>
+                    </div>
+
+                    <div class="absolute bottom-4 left-4 bg-black/60 px-2 py-1 rounded text-xs font-mono text-zinc-400 border border-zinc-800/50 flex gap-4">
+                        <span v-if="isPlaying" class="text-green-500 font-bold">● PLAYING</span>
+                        <span>SHOT {{ activeShot ? activeShot.id : '--' }}</span>
+                        <span class="text-zinc-500">|</span>
+                        <span>{{ activeShot ? activeShot.ratio : '--' }}</span>
+                        <span class="text-zinc-500">|</span>
+                        <span>{{ activeShot ? activeShot.quality : '--' }}</span>
+                    </div>
+                </div>
+
+                <!-- 2. 参数面板 -->
+                <div class="h-52 bg-zinc-900 border-t border-zinc-800 flex flex-col shrink-0">
+                    <div class="h-12 border-b border-zinc-800 flex items-center px-6 gap-4 bg-zinc-850">
+                        
+                        <div class="flex flex-col border-r border-zinc-700 pr-4">
+                            <label class="text-[9px] text-zinc-500 uppercase tracking-wider mb-0.5">Model</label>
+                            <select v-model="project.model_name" class="bg-transparent text-zinc-200 text-xs focus:outline-none cursor-pointer font-bold">
+                                <option>Runway Gen-3 Alpha</option>
+                                <option>Sora</option>
+                                <option>Kling 1.5</option>
+                            </select>
+                        </div>
+
+                        <div class="flex flex-col pr-2">
+                            <label class="text-[9px] text-zinc-500 uppercase tracking-wider mb-0.5">Ratio</label>
+                            <select v-if="activeShot" v-model="activeShot.ratio" class="bg-transparent text-zinc-200 text-xs focus:outline-none cursor-pointer w-20">
+                                <option value="16:9">16:9</option>
+                                <option value="9:16">9:16</option>
+                                <option value="21:9">21:9</option>
+                                <option value="4:3">4:3</option>
+                                <option value="1:1">1:1</option>
+                            </select>
+                        </div>
+
+                        <div class="flex flex-col border-r border-zinc-700 pr-4">
+                            <label class="text-[9px] text-zinc-500 uppercase tracking-wider mb-0.5">Resolution</label>
+                            <select v-if="activeShot" v-model="activeShot.quality" class="bg-transparent text-zinc-200 text-xs focus:outline-none cursor-pointer w-20">
+                                <option value="720p">720p</option>
+                                <option value="1080p">1080p</option>
+                                <option value="2K">2K</option>
+                                <option value="4K">4K</option>
+                            </select>
+                        </div>
+
+                        <div class="flex flex-col">
+                            <label class="text-[9px] text-zinc-500 uppercase tracking-wider mb-0.5">Duration</label>
+                            <div class="flex items-center gap-1 text-zinc-200">
+                                <input :disabled="!activeShot" type="number" v-if="activeShot" v-model="activeShot.duration" class="bg-transparent w-10 focus:outline-none border-b border-dashed border-zinc-600 text-center font-mono text-xs" step="0.5">
+                                <span class="text-xs text-zinc-500">s</span>
+                            </div>
+                        </div>
+
+                        <div class="flex-1"></div>
+
+                        <button class="bg-zinc-100 text-black px-5 py-1.5 text-xs font-bold uppercase tracking-wide hover:bg-white transition flex items-center gap-2 shadow-lg shadow-white/5">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> Generate
+                        </button>
+                    </div>
+
+                    <div class="flex-1 flex p-4 gap-4 overflow-hidden">
+                        <div class="flex-1 flex flex-col">
+                            <label class="text-[9px] text-zinc-500 uppercase tracking-wider mb-1">Prompt</label>
+                            <textarea 
+                                v-if="activeShot"
+                                v-model="activeShot.prompt"
+                                class="flex-1 bg-zinc-950 border border-zinc-800 p-3 text-xs text-zinc-300 focus:border-zinc-500 focus:outline-none resize-none leading-relaxed placeholder-zinc-700"
+                                placeholder="输入分镜描述..."
+                            ></textarea>
+                            <div v-else class="flex-1 bg-zinc-950 border border-zinc-800 flex items-center justify-center text-zinc-700 italic text-xs">请先选择分镜</div>
+                        </div>
+
+                        <div class="w-80 flex flex-col">
+                            <div class="flex justify-between items-end mb-1">
+                                <label class="text-[9px] text-zinc-500 uppercase tracking-wider">Refs (Img/Vid)</label>
+                                <button @click="triggerAssetUpload" class="text-[10px] text-zinc-400 hover:text-white flex items-center gap-1 border border-zinc-700 px-2 py-0.5 rounded hover:bg-zinc-800 transition">
+                                    <i class="fa-solid fa-upload"></i> Upload
+                                </button>
+                            </div>
+                            
+                            <!-- 缩略图滚动区 -->
+                            <div class="flex-1 bg-zinc-950 border border-zinc-800 p-2 flex gap-2 overflow-x-auto items-center">
+                                <template v-if="activeShot && activeShot.assets.length > 0">
+                                    <div 
+                                        v-for="(asset, idx) in activeShot.assets" 
+                                        :key="asset.id"
+                                        @click="previewAsset(asset)"
+                                        class="h-20 w-auto aspect-square bg-zinc-800 border relative group shrink-0 cursor-pointer transition overflow-hidden"
+                                        :class="(tempPreviewAsset && tempPreviewAsset.id === asset.id) ? 'border-white ring-1 ring-white' : 'border-zinc-600 hover:border-zinc-400'"
+                                    >
+                                        <video v-if="asset.type === 'video'" :src="asset.url" class="w-full h-full object-cover"></video>
+                                        <img v-else :src="asset.url" class="w-full h-full object-cover">
+                                        
+                                        <!-- 视频图标提示 -->
+                                        <div v-if="asset.type === 'video'" class="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20">
+                                            <i class="fa-solid fa-play text-white/80 text-xs drop-shadow-md"></i>
+                                        </div>
+
+                                        <div @click.stop="removeAsset(idx)" class="absolute top-0 right-0 bg-red-600/80 text-white w-4 h-4 flex items-center justify-center hover:bg-red-600 hidden group-hover:flex">
+                                            <i class="fa-solid fa-times text-[8px]"></i>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div v-else class="w-full h-full flex flex-col items-center justify-center text-zinc-700 gap-1 border border-dashed border-zinc-800">
+                                    <i class="fa-solid fa-photo-film"></i>
+                                    <span class="text-[9px]">Empty Gallery</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div @click="nextShot" class="w-12 border-l border-zinc-800 bg-zinc-950 hover:bg-zinc-900 cursor-pointer flex items-center justify-center transition group z-10">
+                <i class="fa-solid fa-chevron-right text-zinc-600 group-hover:text-white text-xl"></i>
+            </div>
+
+            <div class="w-56 bg-zinc-950 border-l border-zinc-800 flex flex-col shrink-0">
+                <div class="h-10 border-b border-zinc-800 flex items-center px-4 bg-zinc-900">
+                    <span class="text-xs font-bold text-zinc-400 tracking-wider">PROJECT</span>
+                </div>
+                <div class="p-4">
+                    <h1 class="text-sm font-bold text-zinc-200">{{ project.title || 'Untitled' }}</h1>
+                    <p class="text-xs text-zinc-500 mt-1">{{ project.description }}</p>
+                </div>
+                <div class="flex-1 border-t border-zinc-800 p-4">
+                    <div class="text-[10px] text-zinc-500 uppercase mb-2">Total Duration</div>
+                    <div class="text-xl font-mono text-zinc-300">{{ totalDurationFormatted }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部时间线 -->
+        <div class="h-56 bg-zinc-950 border-t border-zinc-800 flex flex-col shrink-0 z-20 select-none">
+            <div class="h-8 border-b border-zinc-800 flex items-center px-2 justify-between bg-zinc-900">
+                <div class="flex items-center gap-3 px-2">
+                    <button class="text-zinc-400 hover:text-white"><i class="fa-solid fa-magnet text-xs"></i></button>
+                    <div class="w-px h-3 bg-zinc-700"></div>
+                    <button class="text-zinc-400 hover:text-white"><i class="fa-solid fa-scissors text-xs"></i></button>
+                </div>
+                <div class="text-[10px] font-mono text-zinc-400 flex gap-2">
+                    <span :class="{'text-green-500': isPlaying}">{{ currentTimeFormatted }}</span>
+                    <span class="text-zinc-600">/</span>
+                    <span>{{ totalDurationFormatted }}</span>
+                </div>
+                <div class="flex gap-2 px-2">
+                    <input type="range" min="10" max="100" v-model="pxPerSec" class="w-20 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
+
+            <!-- 轨道区 (加入鼠标拖拽监听用于 Scrubber) -->
+            <div 
+                class="flex-1 overflow-x-auto overflow-y-hidden relative bg-zinc-950 p-2 scroll-smooth" 
+                ref="timelineContainer"
+            >
+                
+                <!-- 刻度尺 (可点击/拖拽滑动时间) -->
+                <div class="h-5 w-[5000px] border-b border-zinc-800 mb-1 relative text-[9px] text-zinc-600 font-mono cursor-ew-resize hover:bg-white/5 transition" @mousedown="startScrub">
+                    <div v-for="i in 100" class="absolute bottom-0 h-1.5 w-px bg-zinc-800 pointer-events-none" :style="{left: (i * 5 * pxPerSec) + 'px'}">
+                        <span class="absolute -top-3 -left-2">{{ i * 5 }}s</span>
+                    </div>
+                </div>
+
+                <div class="h-10 w-[5000px] bg-zinc-900/50 border border-zinc-800 rounded-sm mb-2 flex items-center relative overflow-hidden transition hover:border-zinc-600">
+                    <div v-if="project.audio_url" class="absolute inset-0 flex items-center px-2 w-full">
+                        <i class="fa-solid fa-music text-zinc-500 text-xs mr-2"></i>
+                        <span class="text-[10px] text-zinc-400 truncate">{{ project.audio_name }}</span>
+                        <div class="flex-1 h-full flex items-center gap-0.5 opacity-20 ml-4 pointer-events-none">
+                            <div v-for="n in 80" class="w-1 bg-zinc-400 rounded-full" :style="{height: Math.random() * 80 + 10 + '%'}"></div>
+                        </div>
+                    </div>
+                    <div v-else @click="triggerAudioUpload" class="w-full h-full flex items-center justify-center cursor-pointer hover:bg-zinc-900 text-zinc-600 gap-2">
+                        <i class="fa-solid fa-plus"></i> <span class="text-[10px]">Click to Upload Audio</span>
+                    </div>
+                </div>
+
+                <!-- 视频分镜轨 -->
+                <div class="h-20 w-[5000px] flex items-center relative select-none">
+                    
+                    <!-- 分镜块 (支持 Drag & Drop 换序) -->
+                    <div 
+                        v-for="(shot, index) in shots" :key="shot.id"
+                        draggable="true"
+                        @dragstart="onDragStart($event, index)"
+                        @dragover.prevent
+                        @dragenter.prevent
+                        @drop="onDrop($event, index)"
+                        @dragend="onDragEnd"
+                        class="shot-card h-full bg-zinc-800 border rounded-sm relative cursor-pointer group hover:bg-zinc-750 transition-colors flex flex-col justify-between overflow-hidden"
+                        :class="[
+                            selectedShotId === shot.id ? 'border-zinc-300 ring-1 ring-white/20 z-10 bg-zinc-700' : 'border-zinc-600',
+                            draggedIndex === index ? 'opacity-30 border-dashed' : ''
+                        ]"
+                        :style="{width: (shot.duration * pxPerSec) + 'px'}"
+                        @click="selectShot(shot.id)"
+                    >
+                        <div class="absolute inset-0 opacity-20 pointer-events-none">
+                            <video v-if="shot.assets && shot.assets.length > 0 && shot.assets[0].type === 'video'" :src="shot.assets[0].url" class="w-full h-full object-cover grayscale"></video>
+                            <img v-else-if="shot.assets && shot.assets.length > 0" :src="shot.assets[0].url" class="w-full h-full object-cover grayscale">
+                        </div>
+
+                        <div class="flex justify-between items-start p-1 relative z-10 pointer-events-none">
+                            <span class="text-[9px] font-bold text-zinc-300 bg-black/40 px-1 rounded">{{ index + 1 }}</span>
+                            <span class="text-[8px] text-zinc-400 bg-black/40 px-1 rounded transform scale-90 origin-right">{{ shot.ratio }}</span>
+                        </div>
+                        
+                        <div class="p-1 text-right relative z-10 pointer-events-none">
+                             <span class="text-[9px] font-mono text-zinc-400">{{ shot.duration.toFixed(1) }}s</span>
+                        </div>
+
+                        <!-- 拖拽手柄 (阻止 HTML5 Drag 事件，仅用于改时长) -->
+                        <div 
+                            class="absolute top-0 bottom-0 right-0 w-4 cursor-col-resize hover:bg-white/20 z-20 flex items-center justify-center group-hover:opacity-100 opacity-0 transition"
+                            @mousedown.stop.prevent="startDurationResize($event, shot)"
+                        >
+                            <div class="w-0.5 h-4 bg-zinc-400 rounded-full pointer-events-none"></div>
+                        </div>
+                    </div>
+                    
+                    <button @click="createShot" class="h-full w-12 ml-1 border border-zinc-800 border-dashed bg-zinc-900 hover:border-zinc-500 hover:text-white text-zinc-600 flex items-center justify-center transition">
+                        <i class="fa-solid fa-plus"></i>
+                    </button>
+                </div>
+
+                <!-- 播放红线指针 (Scrubber) -->
+                <div 
+                    class="absolute top-0 bottom-0 w-px bg-red-500 z-30 transition-none" 
+                    :style="{left: (currentTime * pxPerSec) + 'px'}"
+                >
+                    <!-- 扩大拖拽热区 -->
+                    <div class="absolute -top-1 -left-3 w-6 h-4 cursor-ew-resize flex justify-center" @mousedown.stop.prevent="startScrub">
+                        <div class="text-red-500 text-xs"><i class="fa-solid fa-caret-down"></i></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 控制条 -->
+            <div class="h-12 border-t border-zinc-800 bg-zinc-900 flex justify-center items-center gap-8 shrink-0 relative">
+                <button @click="stopProject" class="text-zinc-400 hover:text-white"><i class="fa-solid fa-backward-step"></i></button>
+                <button @click="togglePlay" class="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center hover:bg-zinc-200 transition shadow-lg shadow-white/10">
+                    <i :class="isPlaying ? 'fa-solid fa-pause' : 'fa-solid fa-play ml-0.5'"></i>
+                </button>
+                <button class="text-zinc-400 hover:text-white"><i class="fa-solid fa-forward-step"></i></button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted, watch } = Vue;
+
+        // 后端API基础地址
+        const API_BASE = "http://127.0.0.1:8000";
+
+        createApp({
+            setup() {
+                const project = ref({ 
+                    title: "My New Project", 
+                    description: "VTB Trailer", 
+                    audio_url: null, 
+                    audio_name: null, 
+                    model_name: 'Runway Gen-3 Alpha',
+                    resolution: '1920x1080'
+                });
+                const shots = ref([]);
+                const selectedShotId = ref(null);
+                
+                // UI状态
+                const pxPerSec = ref(30);
+                const isPlaying = ref(false);
+                const currentTime = ref(0);
+                
+                // 时长调整相关
+                const resizeState = ref({ active: false, shot: null, startX: 0, startDuration: 0 });
+                // 拖拽换序相关
+                const draggedIndex = ref(-1);
+                // 时间指针滑动相关
+                const isScrubbing = ref(false);
+                const timelineContainer = ref(null);
+                
+                const tempPreviewAsset = ref(null); 
+                
+                const assetInput = ref(null);
+                const audioInput = ref(null);
+                const audioPlayer = ref(null);
+                let playbackInterval = null;
+
+                const activeShot = computed(() => shots.value.find(s => s.id === selectedShotId.value));
+                
+                const processedShots = computed(() => {
+                    let startTime = 0;
+                    return shots.value.map(s => {
+                        const start = startTime;
+                        const end = startTime + s.duration;
+                        startTime = end;
+                        // 补充默认值，避免空值报错
+                        return { 
+                            ...s, 
+                            start, 
+                            end,
+                            ratio: s.ratio || '16:9',
+                            quality: s.quality || '1080p',
+                            assets: s.assets || [],
+                            video_url: s.video_url || null
+                        };
+                    });
+                });
+
+                const totalDuration = computed(() => processedShots.value.length ? processedShots.value[processedShots.value.length - 1].end : 0);
+
+                const currentPlayingShot = computed(() => {
+                    return processedShots.value.find(s => currentTime.value >= s.start && currentTime.value < s.end);
+                });
+
+                const currentPreviewAsset = computed(() => {
+                    if (tempPreviewAsset.value) return tempPreviewAsset.value;
+                    if (activeShot.value && activeShot.value.assets && activeShot.value.assets.length > 0) {
+                        return activeShot.value.assets[0];
+                    }
+                    return null;
+                });
+
+                // 核心：监听当前播放镜头变化，自动切换工作台选中的镜头
+                watch(currentPlayingShot, (newShot) => {
+                    // 排除拖拽/调整状态，避免冲突
+                    if (newShot && !resizeState.value.active && !isScrubbing.value) {
+                        selectedShotId.value = newShot.id;
+                    }
+                }, { immediate: true });
+
+                watch(selectedShotId, () => tempPreviewAsset.value = null);
+
+                const formatTime = (seconds) => {
+                    const m = Math.floor(seconds / 60);
+                    const s = Math.floor(seconds % 60);
+                    const ms = Math.floor((seconds % 1) * 100);
+                    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}:${ms.toString().padStart(2, '0')}`;
+                };
+
+                const currentTimeFormatted = computed(() => formatTime(currentTime.value));
+                const totalDurationFormatted = computed(() => formatTime(totalDuration.value));
+
+                // --- 1. 对接后端数据逻辑 ---
+                const loadData = async () => {
+                    // 从URL获取project_id
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const projectId = urlParams.get('id');
+                    
+                    if (!projectId) {
+                        // 无ID时加载模拟数据，避免空白
+                        shots.value =[
+                            { id: 1, duration: 4.0, prompt: "镜头1：开场动画，VTB微笑招手", ratio: "16:9", quality: "1080p", assets: [], video_url: null },
+                            { id: 2, duration: 3.5, prompt: "镜头2：旋转展示虚拟背景", ratio: "16:9", quality: "1080p", assets:[], video_url: null }
+                        ];
+                        selectedShotId.value = 1;
+                        return;
+                    }
+
+                    try {
+                        // 获取项目信息
+                        const projectRes = await fetch(`${API_BASE}/projects/${projectId}`);
+                        if (!projectRes.ok) throw new Error('项目不存在');
+                        const projectData = await projectRes.json();
+                        project.value = {
+                            ...projectData,
+                            audio_url: project.value.audio_url, // 保留音频上传状态
+                            audio_name: project.value.audio_name
+                        };
+
+                        // 获取该项目的镜头
+                        const shotsRes = await fetch(`${API_BASE}/projects/${projectId}/shots/`);
+                        const shotsData = await shotsRes.json();
+                        shots.value = shotsData.map(shot => ({
+                            ...shot,
+                            assets: [], // 初始化素材数组
+                            video_url: null // 初始化视频URL
+                        }));
+
+                        // 默认选中第一个镜头
+                        if (shots.value.length) {
+                            selectedShotId.value = shots.value[0].id;
+                        }
+                    } catch (e) {
+                        console.error('加载数据失败:', e);
+                        // 加载失败时回退到模拟数据
+                        shots.value =[
+                            { id: 1, duration: 4.0, prompt: "镜头1：默认镜头", ratio: "16:9", quality: "1080p", assets: [], video_url: null }
+                        ];
+                        selectedShotId.value = 1;
+                    }
+                };
+
+                const createShot = () => {
+                    const lastShot = shots.value[shots.value.length - 1];
+                    const newShot = {
+                        id: Date.now(),
+                        duration: 3.0,
+                        prompt: "",
+                        ratio: lastShot ? lastShot.ratio : "16:9",
+                        quality: lastShot ? lastShot.quality : "1080p",
+                        assets:[], 
+                        video_url: null,
+                        project_id: project.value.id // 关联项目ID
+                    };
+                    shots.value.push(newShot);
+                    selectedShotId.value = newShot.id;
+
+                    // 可选：创建镜头时同步到后端
+                    // createShotInBackend(newShot);
+                };
+
+                // 可选：新增镜头到后端
+                const createShotInBackend = async (shot) => {
+                    try {
+                        await fetch(`${API_BASE}/projects/${project.value.id}/shots/`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                prompt: shot.prompt,
+                                duration: shot.duration,
+                                order_index: shots.value.length - 1
+                            })
+                        });
+                    } catch (e) {
+                        console.error('创建镜头失败:', e);
+                    }
+                };
+
+                const selectShot = (id) => {
+                    selectedShotId.value = id;
+                    // 选中镜头时，同步时间指针到镜头起始位置
+                    const target = processedShots.value.find(s => s.id === id);
+                    if (target) currentTime.value = target.start;
+                };
+
+                // --- 2. 时长调整 (Duration Resize) ---
+                const startDurationResize = (e, shot) => {
+                    resizeState.value = { active: true, shot, startX: e.clientX, startDuration: shot.duration };
+                    document.body.style.cursor = 'col-resize';
+                    document.addEventListener('mousemove', handleResizeMove);
+                    document.addEventListener('mouseup', handleResizeUp);
+                };
+
+                const handleResizeMove = (e) => {
+                    if (!resizeState.value.active) return;
+                    const delta = (e.clientX - resizeState.value.startX) / pxPerSec.value;
+                    let newDur = resizeState.value.startDuration + delta;
+                    if (newDur < 0.5) newDur = 0.5;
+                    resizeState.value.shot.duration = newDur;
+                };
+
+                const handleResizeUp = () => {
+                    resizeState.value.active = false;
+                    document.body.style.cursor = 'default';
+                    document.removeEventListener('mousemove', handleResizeMove);
+                    document.removeEventListener('mouseup', handleResizeUp);
+                };
+
+                // --- 3. 拖拽排序 (Drag & Drop Reorder) ---
+                const onDragStart = (e, index) => {
+                    draggedIndex.value = index;
+                    e.dataTransfer.effectAllowed = 'move';
+                };
+
+                const onDrop = (e, targetIndex) => {
+                    if (draggedIndex.value !== -1 && draggedIndex.value !== targetIndex) {
+                        const item = shots.value.splice(draggedIndex.value, 1)[0];
+                        shots.value.splice(targetIndex, 0, item);
+                        // 可选：同步排序到后端（更新order_index）
+                        syncShotOrderToBackend();
+                    }
+                    draggedIndex.value = -1;
+                };
+
+                const syncShotOrderToBackend = async () => {
+                    // 批量更新镜头的order_index
+                    const promises = shots.value.map((shot, index) => 
+                        fetch(`${API_BASE}/shots/${shot.id}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ order_index: index })
+                        })
+                    );
+                    await Promise.all(promises).catch(e => console.error('同步排序失败:', e));
+                };
+
+                const onDragEnd = () => {
+                    draggedIndex.value = -1;
+                };
+
+                // --- 4. 时间指针滑动 (Playhead Scrubbing) ---
+                const startScrub = (e) => {
+                    isScrubbing.value = true;
+                    if (isPlaying.value) togglePlay(); // 拖拽时暂停
+                    updatePlayheadPosition(e);
+                    document.addEventListener('mousemove', updatePlayheadPosition);
+                    document.addEventListener('mouseup', stopScrub);
+                };
+
+                const updatePlayheadPosition = (e) => {
+                    if (!isScrubbing.value || !timelineContainer.value) return;
+                    const rect = timelineContainer.value.getBoundingClientRect();
+                    // 计算鼠标相对于滚动容器的真实X坐标
+                    const x = e.clientX - rect.left + timelineContainer.value.scrollLeft;
+                    let newTime = x / pxPerSec.value;
+                    
+                    if (newTime < 0) newTime = 0;
+                    if (newTime > totalDuration.value) newTime = totalDuration.value;
+                    
+                    currentTime.value = newTime;
+                    
+                    // 拖拽时也同步切换镜头
+                    const targetShot = processedShots.value.find(s => newTime >= s.start && newTime < s.end);
+                    if (targetShot) {
+                        selectedShotId.value = targetShot.id;
+                    }
+                    
+                    if (project.value.audio_url && audioPlayer.value) {
+                        audioPlayer.value.currentTime = newTime;
+                    }
+                };
+
+                const stopScrub = () => {
+                    isScrubbing.value = false;
+                    document.removeEventListener('mousemove', updatePlayheadPosition);
+                    document.removeEventListener('mouseup', stopScrub);
+                };
+
+                // --- 5. 媒体上传 ---
+                const triggerAssetUpload = () => assetInput.value.click();
+                
+                const handleAssetUpload = (e) => {
+                    const files = e.target.files;
+                    if (files.length > 0 && activeShot.value) {
+                        for (let i = 0; i < files.length; i++) {
+                            // 判断是图片还是视频
+                            const type = files[i].type.startsWith('video') ? 'video' : 'image';
+                            const url = URL.createObjectURL(files[i]);
+                            activeShot.value.assets.push({ id: Date.now() + i, url, type });
+                        }
+                        e.target.value = ''; 
+                    }
+                };
+
+                const removeAsset = (idx) => activeShot.value && activeShot.value.assets.splice(idx, 1);
+                const previewAsset = (asset) => tempPreviewAsset.value = asset;
+
+                const triggerAudioUpload = () => audioInput.value.click();
+                const handleAudioUpload = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const url = URL.createObjectURL(file);
+                        project.value.audio_url = url;
+                        project.value.audio_name = file.name;
+                        audioPlayer.value.src = url;
+                        e.target.value = '';
+                    }
+                };
+
+                // --- 6. 播放控制 ---
+                const togglePlay = () => {
+                    if (isPlaying.value) {
+                        isPlaying.value = false;
+                        clearInterval(playbackInterval);
+                        if (project.value.audio_url) audioPlayer.value.pause();
+                    } else {
+                        // 如果在结尾，重置到开头
+                        if (currentTime.value >= totalDuration.value) currentTime.value = 0;
+                        
+                        isPlaying.value = true;
+                        if (project.value.audio_url) {
+                            audioPlayer.value.currentTime = currentTime.value;
+                            audioPlayer.value.play();
+                        }
+                        const fps = 30;
+                        playbackInterval = setInterval(() => {
+                            currentTime.value += 1 / fps;
+                            if (currentTime.value >= totalDuration.value) {
+                                currentTime.value = totalDuration.value;
+                                stopProject();
+                            }
+                        }, 1000 / fps);
+                    }
+                };
+
+                const stopProject = () => {
+                    isPlaying.value = false;
+                    clearInterval(playbackInterval);
+                    currentTime.value = 0;
+                    // 停止时回到第一个镜头
+                    if (shots.value.length) {
+                        selectedShotId.value = shots.value[0].id;
+                    }
+                    if (project.value.audio_url) {
+                        audioPlayer.value.pause();
+                        audioPlayer.value.currentTime = 0;
+                    }
+                };
+
+                const prevShot = () => {
+                    const idx = shots.value.findIndex(s => s.id === selectedShotId.value);
+                    if(idx > 0) selectShot(shots.value[idx-1].id);
+                };
+                
+                const nextShot = () => {
+                    const idx = shots.value.findIndex(s => s.id === selectedShotId.value);
+                    if(idx < shots.value.length - 1) selectShot(shots.value[idx+1].id);
+                };
+
+                onMounted(loadData);
+
+                return {
+                    project, shots, activeShot, selectedShotId,
+                    pxPerSec, isPlaying, currentTime,
+                    currentTimeFormatted, totalDurationFormatted,
+                    currentPlayingShot, currentPreviewAsset, tempPreviewAsset,
+                    assetInput, audioInput, audioPlayer, timelineContainer,
+                    createShot, selectShot, prevShot, nextShot,
+                    
+                    startDurationResize, 
+                    draggedIndex, onDragStart, onDrop, onDragEnd,
+                    startScrub,
+                    
+                    triggerAssetUpload, handleAssetUpload, removeAsset, previewAsset,
+                    triggerAudioUpload, handleAudioUpload,
+                    togglePlay, stopProject
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

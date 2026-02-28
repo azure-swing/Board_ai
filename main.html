@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI.Director - 主页</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { colors: { zinc: { 950: '#0a0a0a', 900: '#18181b', 800: '#27272a', 400: '#a1a1aa', 100: '#f4f4f5' } } } }
+        }
+    </script>
+    <style>body { background-color: #0a0a0a; color: #f4f4f5; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }</style>
+</head>
+<body class="overflow-hidden">
+    <div id="app" class="min-h-screen p-8 md:p-16">
+        <header class="flex justify-between items-center mb-16">
+            <h1 class="text-2xl font-bold tracking-widest uppercase">AI.Director</h1>
+            <div class="flex gap-4">
+                <button class="px-4 py-2 text-sm border border-zinc-800 hover:bg-zinc-900 transition">素材库</button>
+                <button @click="createNewProject" class="px-4 py-2 text-sm bg-white text-black font-semibold hover:bg-zinc-200 transition">
+                    + 新建项目
+                </button>
+            </div>
+        </header>
+
+        <section>
+            <h2 class="text-zinc-400 text-sm mb-6 uppercase tracking-wider">最近项目 (Recent Projects)</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                <!-- 动态渲染项目列表 -->
+                <div 
+                    v-for="project in projects" :key="project.id"
+                    @click="openProject(project.id)"
+                    class="group cursor-pointer border border-zinc-800 bg-zinc-900 p-5 rounded-sm hover:border-zinc-400 transition duration-300 flex flex-col h-48 justify-between"
+                >
+                    <div>
+                        <h3 class="text-lg font-medium mb-1">{{ project.title }}</h3>
+                        <p class="text-xs text-zinc-500 line-clamp-2">{{ project.description || '无描述' }}</p>
+                    </div>
+                    <div class="flex justify-between items-end text-xs text-zinc-600">
+                        <span>{{ project.resolution }}</span>
+                        <span class="px-2 py-1 bg-zinc-950 rounded-sm border border-zinc-800">{{ project.model_name }}</span>
+                    </div>
+                </div>
+                <!-- 空状态提示 -->
+                <div v-if="projects.length === 0" class="col-span-full py-20 text-center text-zinc-600 border border-dashed border-zinc-800">
+                    暂无项目，点击右上角新建
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+        const API_BASE = "http://127.0.0.1:8000";
+
+        createApp({
+            setup() {
+                const projects = ref([]);
+
+                // 从后端读取项目列表
+                const fetchProjects = async () => {
+                    try {
+                        const res = await fetch(`${API_BASE}/projects/`);
+                        projects.value = await res.json();
+                    } catch (e) {
+                        console.error("无法连接到后端:", e);
+                    }
+                };
+
+                // 创建新项目
+                const createNewProject = async () => {
+                    const title = prompt("请输入项目名称:", "未命名项目");
+                    if (!title) return;
+
+                    try {
+                        const res = await fetch(`${API_BASE}/projects/`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ title, description: "新创建的项目" })
+                        });
+                        const newProj = await res.json();
+                        openProject(newProj.id);
+                    } catch (e) {
+                        alert("创建失败，请检查后端服务");
+                    }
+                };
+
+                const openProject = (id) => {
+                    window.location.href = `board.html?id=${id}`;
+                };
+
+                onMounted(fetchProjects);
+
+                return { projects, createNewProject, openProject };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
